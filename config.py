@@ -20,7 +20,7 @@ Read top to bottom — sections are grouped by what they do.
 #   - We mark as "HIGH CONVICTION" if surprise >= EARNINGS_HIGH_CONVICTION_THRESHOLD
 
 EARNINGS_NOTIFY_THRESHOLD = 5.0        # % - notify if beat is at least this big
-EARNINGS_HIGH_CONVICTION_THRESHOLD = 10.0  # % - flag as high conviction
+EARNINGS_HIGH_CONVICTION_THRESHOLD = 15.0  # % - high conviction (dissertation: bigger surprise = stronger drift)
 
 # Also require a minimum revenue beat (sometimes EPS beats are achieved via
 # buybacks/cost cuts and don't reflect real momentum). Set to 0 to disable.
@@ -48,13 +48,25 @@ MA_REQUIRE_FIRM_OFFER = True
 # Mid-cap and large-cap only — small-caps are illiquid and often unbuyable on
 # Trading 212 anyway. Filter applied after fetching the event.
 
-MIN_MARKET_CAP_USD = 500_000_000   # $500m for US stocks
-MIN_MARKET_CAP_GBP = 500_000_000   # £500m for UK stocks
+MIN_MARKET_CAP_USD = 2_000_000_000   # $2bn for US stocks (raised from $500m to filter illiquid noise)
+MIN_MARKET_CAP_GBP = 2_000_000_000   # £2bn for UK stocks
 
 # Tickers to always ignore (add anything you don't want alerts for)
 # Example: penny stocks, OTC, anything not on Trading 212
 IGNORE_TICKERS = {
     # add tickers here as strings, e.g. "GME", "AMC"
+}
+
+# Sectors to exclude based on dissertation findings.
+# Financial sector showed 40% accuracy (worse than coin-flip) in the 70-event study,
+# so we skip it. Finnhub's sector names vary slightly, so we match common variants.
+IGNORE_SECTORS = {
+    "Finance",
+    "Financial Services",
+    "Financials",
+    "Banks",
+    "Banking",
+    "Insurance",
 }
 
 
