@@ -58,21 +58,25 @@ def _calculate_surprise_pct(actual: float, estimate: float) -> float | None:
     return ((actual - estimate) / abs(estimate)) * 100
 
 
-def _get_market_cap(ticker: str) -> float | None:
+def _get_company_profile(ticker: str) -> dict:
     """
-    Fetch market cap (in USD millions, converted to absolute USD) from Finnhub.
-    Used to filter out small-caps. Returns None if unavailable.
+    Fetch company profile from Finnhub: market cap (USD), sector, industry.
+    Returns dict with keys: market_cap_usd, sector, industry. Values may be None.
+    Used to filter out small-caps and excluded sectors.
     """
+    result = {"market_cap_usd": None, "sector": None, "industry": None}
     try:
         data = _finnhub_get("/stock/profile2", {"symbol": ticker})
         # Finnhub returns marketCapitalization in millions of USD
         cap_millions = data.get("marketCapitalization")
         if cap_millions:
-            return cap_millions * 1_000_000
+            result["market_cap_usd"] = cap_millions * 1_000_000
+        # finnhubIndustry is the closest thing Finnhub gives to a sector label
+        result["sector"] = data.get("finnhubIndustry")
+        result["industry"] = data.get("gsubind")  # GICS sub-industry, may be None
     except Exception as e:
-        log.warning(f"Failed to get market cap for {ticker}: {e}")
-    return None
-
+        log.warning(f"Failed to get company profile for {ticker}: {e}")
+    return result
 
 def _is_uk_ticker(ticker: str) -> bool:
     """LSE tickers on Finnhub end in '.L' (e.g. 'LLOY.L')."""
@@ -131,9 +135,18 @@ def fetch_recent_earnings() -> list[dict]:
             log.debug(f"{ticker}: EPS beat but revenue weak ({rev_surprise:.1f}%), skipping")
             continue
 
-        # Apply market cap filter
-        market_cap = _get_market_cap(ticker)
+        # Fetch company profile (market cap + sector) in one call
+        profile = _get_company_profile(ticker)
+        market_cap = profile["market_cap_usd"]
+        sector = profile["sector"]
         is_uk = _is_uk_ticker(ticker)
+
+        # Sector filter — skip excluded sectors (e.g. Financials per dissertation)
+        if sector and any(excluded.lower() in sector.lower() for excluded in config.IGNORE_SECTORS):
+            log.debug(f"{ticker}: sector '{sector}' is excluded, skipping")
+            continue
+
+        # Market cap filter
         # UK threshold in GBP, US in USD — for simplicity we treat them as
         # roughly equivalent (within 25%) since exact FX is overkill here.
         threshold = (
