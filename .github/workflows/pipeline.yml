@@ -1,0 +1,58 @@
+name: Signal Pipeline
+
+# Runs every 5 minutes, 24/7. The script itself decides whether to actually
+# do work based on config.ACTIVE_HOURS_UTC_START / END (so weekends and
+# overnight runs are quick no-ops, not full data fetches).
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes
+  workflow_dispatch:        # also lets you trigger manually from the Actions tab
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore signals database from cache
+        uses: actions/cache@v4
+        with:
+          path: signals.db
+          key: signals-db-${{ github.run_id }}
+          restore-keys: |
+            signals-db-
+
+      - name: Run pipeline
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python run.py
+
+      - name: Commit updated database
+        run: |
+          if [[ -n $(git status --porcelain signals.db) ]]; then
+            git config user.name "signal-pipeline-bot"
+            git config user.email "actions@github.com"
+            git add signals.db
+            git commit -m "chore: update signals db [skip ci]"
+            git push
+          else
+            echo "No database changes to commit"
+          fi
