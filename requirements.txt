@@ -1,0 +1,9 @@
+# Core dependencies
+requests>=2.31.0          # HTTP requests to Finnhub, SEC, LSE
+python-dotenv>=1.0.0      # Load API keys from .env file locally
+anthropic>=0.40.0         # Claude API for AI takes
+feedparser>=6.0.10        # Parsing RSS feeds (SEC EDGAR, LSE RNS)
+beautifulsoup4>=4.12.0    # HTML parsing for LSE RNS pages
+lxml>=4.9.0               # XML parser for SEC filings
+
+# Standard library covers the rest (sqlite3, datetime, logging, etc.)
