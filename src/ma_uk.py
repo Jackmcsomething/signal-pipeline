@@ -22,6 +22,8 @@ Note: Web scraping comes with risks — sites change layouts, sometimes
 block scrapers. If LSE blocks us, the fallback is to use a paid news API
 like Marketaux or Benzinga that includes RNS coverage.
 """
+from __future__ import annotations
+
 import os
 import re
 import json

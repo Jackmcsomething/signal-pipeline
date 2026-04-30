@@ -19,6 +19,8 @@ How we get it:
 Note: SEC requires a User-Agent header identifying the requester.
 Set SEC_USER_AGENT in config.py with your real email.
 """
+from __future__ import annotations
+
 import os
 import re
 import json

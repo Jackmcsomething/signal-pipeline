@@ -9,14 +9,17 @@ Why SQLite:
   - Plenty fast for our volume (a few hundred events/day max)
   - When we add the v2 performance tracker, we just query this same db
 
-Two tables:
-  signals          - every event we've detected
-  notifications    - which signals we've actually pushed (for dedup)
+Three tables:
+  signals           - every event we've detected
+  company_profiles  - cached Finnhub /stock/profile2 data (24h TTL)
+                      prevents hammering the API every cycle for the same tickers
 
 The dedup logic prevents you from getting the same alert twice if the pipeline
 runs and re-detects an event (which happens often — RSS feeds re-publish, APIs
 return overlapping windows, etc).
 """
+from __future__ import annotations
+
 import sqlite3
 import logging
 from datetime import datetime
@@ -96,6 +99,24 @@ CREATE TABLE IF NOT EXISTS signals (
 CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker);
 CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source);
 CREATE INDEX IF NOT EXISTS idx_signals_detected_at ON signals(detected_at);
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- Company profile cache (Finnhub /stock/profile2)
+-- ─────────────────────────────────────────────────────────────────────────
+-- Avoids calling Finnhub for the same ticker every 5-minute cycle.
+-- TTL is enforced in Python (see earnings.py CACHE_TTL_HOURS), not here.
+-- INSERT OR REPLACE gives us a free upsert — last_updated is refreshed on
+-- every successful Finnhub response.
+CREATE TABLE IF NOT EXISTS company_profiles (
+    ticker          TEXT PRIMARY KEY,
+    company_name    TEXT,
+    market_cap_usd  REAL,
+    sector          TEXT,       -- finnhubIndustry e.g. "Technology"
+    industry        TEXT,       -- GICS sub-industry (gsubind), may be NULL
+    exchange        TEXT,       -- e.g. "NASDAQ", "LSE"
+    country         TEXT,       -- e.g. "US", "GB"
+    last_updated    TEXT NOT NULL   -- ISO UTC timestamp of last Finnhub fetch
+);
 """
 
 
@@ -172,3 +193,52 @@ def get_pending_notifications() -> list[dict]:
             """
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Company profile cache
+# ─────────────────────────────────────────────────────────────────────────
+
+def get_cached_profile(ticker: str) -> dict | None:
+    """
+    Return the cached profile row for a ticker, or None if not cached.
+    Does NOT check freshness — the caller decides whether to use or refresh it.
+    Returned dict keys: ticker, company_name, market_cap_usd, sector,
+                        industry, exchange, country, last_updated.
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM company_profiles WHERE ticker = ?",
+            (ticker,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_profile(ticker: str, profile: dict):
+    """
+    Insert or update a company profile. Overwrites on conflict (ticker is PK).
+    Sets last_updated to now (UTC).
+
+    Expected keys in profile (all optional except ticker):
+        company_name, market_cap_usd, sector, industry, exchange, country
+    """
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO company_profiles
+                (ticker, company_name, market_cap_usd, sector, industry,
+                 exchange, country, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ticker,
+                profile.get("company_name"),
+                profile.get("market_cap_usd"),
+                profile.get("sector"),
+                profile.get("industry"),
+                profile.get("exchange"),
+                profile.get("country"),
+                now,
+            ),
+        )
