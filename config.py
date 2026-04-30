@@ -150,4 +150,4 @@ SEC_EDGAR_BASE_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
 LSE_RNS_BASE_URL = "https://www.londonstockexchange.com/news"
 
 # SEC requires a User-Agent header identifying you. Change to your details.
-SEC_USER_AGENT = "Signal Pipeline jack@example.com"
+SEC_USER_AGENT = "Signal Pipeline jackgwhite@yahoo.co.uk"

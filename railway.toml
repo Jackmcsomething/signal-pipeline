@@ -1,0 +1,21 @@
+# railway.toml
+# ─────────────
+# Tells Railway how to build and run this service.
+# Docs: https://docs.railway.com/reference/config-as-code
+
+[build]
+builder = "NIXPACKS"          # auto-detects Python + pip, no Dockerfile needed
+
+[deploy]
+startCommand = "python worker.py"
+restartPolicyType = "ON_FAILURE"   # auto-restart if the process crashes
+restartPolicyMaxRetries = 10       # give up after 10 rapid crashes (avoids crash loop burning credits)
+
+# Railway healthchecks require an HTTP endpoint, which this worker doesn't
+# expose (it's a background process, not a web server). The restart policy
+# above is the right recovery mechanism for a worker process.
+# If you later add a /health HTTP endpoint, uncomment and set:
+# [deploy.healthcheck]
+# path = "/health"
+# intervalSeconds = 30
+# timeoutSeconds = 10

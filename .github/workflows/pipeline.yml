@@ -1,13 +1,14 @@
 name: Signal Pipeline
 
-# Runs every 5 minutes, 24/7. The script itself decides whether to actually
-# do work based on config.ACTIVE_HOURS_UTC_START / END (so weekends and
-# overnight runs are quick no-ops, not full data fetches).
+# Schedule disabled — pipeline now runs as a persistent worker on Railway.
+# Railway is more reliable than GitHub's free-tier cron (which drifts 30+
+# minutes and occasionally batches queued runs, causing notification floods).
+#
+# workflow_dispatch is kept so you can trigger a one-off manual run from
+# the Actions tab if you ever need to test or debug without Railway.
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes
-  workflow_dispatch:        # also lets you trigger manually from the Actions tab
+  workflow_dispatch:        # manual trigger only
 
 jobs:
   run-pipeline:
