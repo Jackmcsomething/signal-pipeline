@@ -51,6 +51,8 @@ import requests
 
 import config
 from src import database
+from src import scoring as scoring_v1
+from src import scoring_v2
 
 log = logging.getLogger(__name__)
 
@@ -129,25 +131,29 @@ def _profile_from_row(row: dict) -> dict:
     used throughout earnings.py.
     """
     return {
-        "company_name": row.get("company_name"),
-        "market_cap_usd": row.get("market_cap_usd"),
-        "sector": row.get("sector"),
-        "industry": row.get("industry"),
-        "exchange": row.get("exchange"),
-        "country": row.get("country"),
+        "company_name":     row.get("company_name"),
+        "market_cap_usd":   row.get("market_cap_usd"),
+        "sector":           row.get("sector"),
+        "industry":         row.get("industry"),
+        "exchange":         row.get("exchange"),
+        "country":          row.get("country"),
+        # Actual share count (not millions). Used by v2 absolute surprise calc.
+        "shares_outstanding": row.get("shares_outstanding"),
     }
 
 
 def _profile_from_api(data: dict) -> dict:
     """Parse a raw Finnhub /stock/profile2 response into the standard shape."""
-    cap_millions = data.get("marketCapitalization")
+    cap_millions    = data.get("marketCapitalization")   # USD millions
+    shares_millions = data.get("shareOutstanding")       # shares in millions
     return {
-        "company_name": data.get("name"),
-        "market_cap_usd": cap_millions * 1_000_000 if cap_millions else None,
-        "sector": data.get("finnhubIndustry"),
-        "industry": data.get("gsubind"),
-        "exchange": data.get("exchange"),
-        "country": data.get("country"),
+        "company_name":     data.get("name"),
+        "market_cap_usd":   cap_millions    * 1_000_000 if cap_millions    else None,
+        "shares_outstanding": shares_millions * 1_000_000 if shares_millions else None,
+        "sector":           data.get("finnhubIndustry"),
+        "industry":         data.get("gsubind"),
+        "exchange":         data.get("exchange"),
+        "country":          data.get("country"),
     }
 
 
@@ -255,14 +261,20 @@ def fetch_recent_earnings() -> list[dict]:
     log.info(f"Finnhub returned {len(earnings_list)} earnings entries")
 
     # Per-cycle profile cache stats — logged as one line at the end
-    stats = {"hits": 0, "misses": 0, "stale_fallback": 0, "skipped": 0}
+    cache_stats = {"hits": 0, "misses": 0, "stale_fallback": 0, "skipped": 0}
+
+    # Per-cycle v2 tier counts for the summary log line
+    v2_stats = {
+        "standard": 0, "high": 0, "very_high": 0,
+        "below_threshold": 0, "disqualified": 0,
+    }
 
     events = []
     for entry in earnings_list:
-        ticker = entry.get("symbol")
-        eps_actual = entry.get("epsActual")
+        ticker       = entry.get("symbol")
+        eps_actual   = entry.get("epsActual")
         eps_estimate = entry.get("epsEstimate")
-        rev_actual = entry.get("revenueActual")
+        rev_actual   = entry.get("revenueActual")
         rev_estimate = entry.get("revenueEstimate")
 
         # Skip if hasn't reported yet
@@ -277,7 +289,7 @@ def fetch_recent_earnings() -> list[dict]:
         eps_surprise = _calculate_surprise_pct(eps_actual, eps_estimate)
         rev_surprise = _calculate_surprise_pct(rev_actual, rev_estimate)
 
-        # Apply revenue beat filter (avoids EPS beats driven only by buybacks)
+        # Revenue beat filter (avoids EPS beats driven only by buybacks/cost cuts)
         if (
             config.EARNINGS_MIN_REVENUE_BEAT > 0
             and rev_surprise is not None
@@ -286,17 +298,17 @@ def fetch_recent_earnings() -> list[dict]:
             log.debug(f"{ticker}: EPS beat but revenue weak ({rev_surprise:.1f}%), skipping")
             continue
 
-        # Fetch company profile (market cap + sector), cache-first
-        profile = _get_company_profile(ticker, stats)
+        # Fetch company profile (market cap, sector, shares_outstanding), cache-first
+        profile = _get_company_profile(ticker, cache_stats)
         if profile is None:
             # 429 with no cached data — skip this ticker, retry next cycle
             continue
 
         market_cap = profile["market_cap_usd"]
-        sector = profile["sector"]
-        is_uk = _is_uk_ticker(ticker)
+        sector     = profile["sector"]
+        is_uk      = _is_uk_ticker(ticker)
 
-        # Sector filter — skip excluded sectors (e.g. Financials per dissertation)
+        # Sector filter (Financials excluded per dissertation 40% accuracy finding)
         if sector and any(
             excluded.lower() in sector.lower()
             for excluded in config.IGNORE_SECTORS
@@ -304,9 +316,7 @@ def fetch_recent_earnings() -> list[dict]:
             log.debug(f"{ticker}: sector '{sector}' is excluded, skipping")
             continue
 
-        # Market cap filter
-        # UK threshold in GBP, US in USD — for simplicity we treat them as
-        # roughly equivalent (within 25%) since exact FX is overkill here.
+        # Market cap gatekeeper (applied before v2 scoring per spec)
         threshold = config.MIN_MARKET_CAP_GBP if is_uk else config.MIN_MARKET_CAP_USD
         if market_cap is not None and market_cap < threshold:
             log.debug(
@@ -314,28 +324,75 @@ def fetch_recent_earnings() -> list[dict]:
             )
             continue
 
-        period_end = entry.get("date", today.isoformat())
+        # ── v1 scoring (parallel, for paper-test comparison) ────────────────
+        # Temporarily attach the fields score_earnings() needs
+        _tmp_event = {"surprise_pct": eps_surprise}
+        v1_score, v1_hc = scoring_v1.score_earnings(_tmp_event)
+        v1_would_notify = int(v1_score != 0)
 
-        # Use the real company name from profile if available; fall back to symbol
+        # ── v2 scoring ────────────────────────────────────────────────────────
+        # Pass the raw Finnhub entry as part of the event so score_earnings_v2
+        # can read epsActual / epsEstimate for the absolute surprise calculation.
+        _v2_event = {
+            "surprise_pct":  eps_surprise,
+            "eps_actual":    eps_actual,
+            "eps_estimate":  eps_estimate,
+        }
+        v2 = scoring_v2.score_earnings_v2(_v2_event, profile)
+
+        # Track v2 tier counts for summary logging (including disqualified)
+        v2_stats[v2["tier"]] += 1
+
+        # Drop disqualified events — beat% < 2% is noise, don't persist
+        if v2["tier"] == "disqualified":
+            log.debug(f"{ticker}: v2 disqualified (surprise {eps_surprise:.1f}%), dropping")
+            continue
+
+        period_end   = entry.get("date", today.isoformat())
         company_name = profile.get("company_name") or ticker
 
         events.append({
-            "event_id": f"EARNINGS_{ticker}_{period_end}",
-            "source": "earnings",
-            "ticker": ticker,
-            "company_name": company_name,
-            "market": "UK" if is_uk else "US",
+            # ── Core event fields ──────────────────────────────────────────
+            "event_id":      f"EARNINGS_{ticker}_{period_end}",
+            "source":        "earnings",
+            "ticker":        ticker,
+            "company_name":  company_name,
+            "market":        "UK" if is_uk else "US",
             "market_cap_usd": market_cap,
-            "event_time": entry.get("date", datetime.utcnow().isoformat()),
-            "surprise_pct": eps_surprise,
+            "event_time":    entry.get("date", datetime.utcnow().isoformat()),
+            "surprise_pct":  eps_surprise,
             "deal_size_usd": None,
-            "deal_premium": None,
-            "raw_data": json.dumps(entry),
+            "deal_premium":  None,
+            "raw_data":      json.dumps(entry),
+            # ── v1 scores (legacy / comparison) ───────────────────────────
+            "score":              v1_score,        # keep for M&A query compat
+            "is_high_conviction": int(v1_hc),
+            "v1_score":           v1_score,
+            "v1_high_conviction": int(v1_hc),
+            "v1_would_notify":    v1_would_notify,
+            # ── v2 scores ─────────────────────────────────────────────────
+            "v2_magnitude_score":          v2["magnitude_score"],
+            "v2_absolute_surprise_score":  v2["absolute_surprise_score"],
+            "v2_absolute_surprise_usd":    v2["absolute_surprise_usd"],
+            "v2_absolute_surprise_method": v2["absolute_surprise_method"],
+            "v2_cap_modifier":             v2["cap_modifier"],
+            "v2_conviction_score":         v2["conviction_score"],
+            "v2_tier":                     v2["tier"],
+            "v2_would_notify":             int(v2["would_notify"]),
+            "v2_reason_codes":             json.dumps(v2["reason_codes"]),
         })
 
     log.info(
         f"Filtered to {len(events)} qualifying earnings events | "
-        f"Profile cache: {stats['hits']} hits, {stats['misses']} misses, "
-        f"{stats['stale_fallback']} stale-fallback, {stats['skipped']} skipped"
+        f"Profile cache: {cache_stats['hits']} hits, {cache_stats['misses']} misses, "
+        f"{cache_stats['stale_fallback']} stale-fallback, {cache_stats['skipped']} skipped"
+    )
+    log.info(
+        f"v2 events: "
+        f"{v2_stats['standard']} standard, "
+        f"{v2_stats['high']} high, "
+        f"{v2_stats['very_high']} very_high, "
+        f"{v2_stats['below_threshold']} below_threshold, "
+        f"{v2_stats['disqualified']} disqualified"
     )
     return events

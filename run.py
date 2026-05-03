@@ -99,9 +99,12 @@ def run_cycle():
     log.info(f"Total events fetched: {len(all_events)}")
 
     # 4 + 5. Score and persist
+    # Earnings events come pre-scored (v1 + v2) from fetch_recent_earnings().
+    # M&A events still use v1 scoring here — M&A scoring is unchanged.
     new_count = 0
     for event in all_events:
-        scoring.score_event(event)
+        if event["source"] != "earnings":
+            scoring.score_event(event)   # v1 only for M&A
         row_id = database.insert_signal(event)
         if row_id is not None:
             new_count += 1

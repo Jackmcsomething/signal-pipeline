@@ -120,10 +120,52 @@ CREATE TABLE IF NOT EXISTS company_profiles (
 """
 
 
+def _run_migrations(conn):
+    """
+    Add new columns to existing tables without touching existing data.
+
+    ALTER TABLE ADD COLUMN is idempotent here: SQLite raises OperationalError
+    with "duplicate column name" if the column already exists; we catch and
+    ignore that specific error so this function is safe to call every cycle.
+
+    Do NOT add CREATE TABLE statements here — those belong in SCHEMA above.
+    """
+    def _add_col(table: str, col_def: str):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise  # genuine schema error — let it bubble up
+
+    # ── signals: v1 mirror columns (for paper-test comparison) ────────────
+    _add_col("signals", "v1_score INTEGER")
+    _add_col("signals", "v1_high_conviction BOOLEAN DEFAULT 0")
+    _add_col("signals", "v1_would_notify BOOLEAN DEFAULT 0")
+
+    # ── signals: v2 conviction scoring columns ────────────────────────────
+    _add_col("signals", "v2_magnitude_score INTEGER")
+    _add_col("signals", "v2_absolute_surprise_score INTEGER")
+    _add_col("signals", "v2_absolute_surprise_usd REAL")
+    _add_col("signals", "v2_absolute_surprise_method TEXT")
+    _add_col("signals", "v2_cap_modifier INTEGER")
+    _add_col("signals", "v2_conviction_score INTEGER")
+    _add_col("signals", "v2_tier TEXT")
+    _add_col("signals", "v2_would_notify BOOLEAN DEFAULT 0")
+    _add_col("signals", "v2_reason_codes TEXT")   # JSON-serialised list
+
+    # ── company_profiles: shares outstanding (needed for v2 abs surprise) ─
+    _add_col("company_profiles", "shares_outstanding REAL")  # actual share count
+
+
 def init_db():
-    """Create tables if they don't exist. Safe to call repeatedly."""
+    """Create tables and run schema migrations. Safe to call every cycle."""
     with get_db() as conn:
         conn.executescript(SCHEMA)
+    # executescript() issues an implicit COMMIT before running, so migrations
+    # must run in a separate connection context after tables are guaranteed
+    # to exist.
+    with get_db() as conn:
+        _run_migrations(conn)
     log.info(f"Database initialized at {config.DATABASE_PATH}")
 
 
@@ -176,19 +218,27 @@ def mark_notified(event_id: str):
 
 def get_pending_notifications() -> list[dict]:
     """
-    Return all signals that we should notify on but haven't yet.
+    Return all signals that should be notified but haven't been yet.
 
-    A signal is "pending notification" if:
-      - it has been inserted into the DB
-      - notified_at is NULL
-      - it meets the notify thresholds (score != 0 OR explicitly high-conviction)
+    Notification decision differs by source:
+      - earnings : use v2_would_notify (v2 conviction model)
+      - ma_us / ma_uk : use v1 score != 0 (M&A stays on v1)
+
+    Old earnings rows from before v2 was deployed have NULL v2_would_notify.
+    Those rows are already marked notified_at (they fired under the old system),
+    so the NULL check here is safe — they won't be re-triggered.
     """
     with get_db() as conn:
         rows = conn.execute(
             """
             SELECT * FROM signals
             WHERE notified_at IS NULL
-              AND (score != 0 OR is_high_conviction = 1)
+              AND (
+                  (source = 'earnings' AND v2_would_notify = 1)
+                  OR
+                  (source IN ('ma_us', 'ma_uk')
+                   AND (score != 0 OR is_high_conviction = 1))
+              )
             ORDER BY detected_at ASC
             """
         ).fetchall()
@@ -220,7 +270,8 @@ def upsert_profile(ticker: str, profile: dict):
     Sets last_updated to now (UTC).
 
     Expected keys in profile (all optional except ticker):
-        company_name, market_cap_usd, sector, industry, exchange, country
+        company_name, market_cap_usd, sector, industry, exchange, country,
+        shares_outstanding (actual share count, not millions)
     """
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
@@ -228,8 +279,8 @@ def upsert_profile(ticker: str, profile: dict):
             """
             INSERT OR REPLACE INTO company_profiles
                 (ticker, company_name, market_cap_usd, sector, industry,
-                 exchange, country, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 exchange, country, shares_outstanding, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ticker,
@@ -239,6 +290,7 @@ def upsert_profile(ticker: str, profile: dict):
                 profile.get("industry"),
                 profile.get("exchange"),
                 profile.get("country"),
+                profile.get("shares_outstanding"),
                 now,
             ),
         )
